@@ -1,0 +1,69 @@
+---
+title: Examples catalog
+description: Noir circuits included in the ProveKit v1.0.2 release, with verified run status.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The [`v1.0.2` examples](https://github.com/worldfnd/provekit/tree/v1.0.2/noir-examples) are the circuits available with this documentation's release. Use the [Quickstart](/getting-started/quickstart/) for the smallest proof flow, or the [Tutorial](/getting-started/tutorial/) to make a circuit with a public commitment and verify it from Rust.
+
+## End-to-end runnable circuits
+
+Each package below includes `Nargo.toml` and `Prover.toml`. From a v1.0.2 source checkout, run:
+
+```sh
+cd noir-examples/<name>
+cargo run --release --bin provekit-cli -- prepare
+cargo run --release --bin provekit-cli -- prove
+cargo run --release --bin provekit-cli -- verify
+```
+
+These flows completed `prepare`, `prove`, and `verify` against the v1.0.2 tag on macOS ARM64:
+
+| Example | What it demonstrates |
+| :--- | :--- |
+| **`basic`** | Poseidon2 BN254 permutation with private inputs; the smallest checked-in circuit. |
+| **`basic-2`**, **`basic-3`**, **`basic-4`** | Small arithmetic circuits used as compiler regression cases. |
+| **`poseidon2`**, **`poseidon-var`** | Poseidon2 circuits with different input shapes. |
+| **`poseidon-rounds`** | Repeated Poseidon2 permutation rounds used in benchmarking. |
+| **`p256_bigcurve`** | P-256 verification via the `zkpassport/noir_bigcurve` representation. |
+| **`zkchase`** | State transitions and rules in a small game-like circuit. |
+
+## Included examples that do not complete the flow
+
+The v1.0.2 tag also contains the following packages. They are useful as source references, but do not follow the three-command recipe above:
+
+| Example | Observed v1.0.2 limitation |
+| :--- | :--- |
+| **`sha256`** | No checked-in `Prover.toml` for the default `prove` command. |
+| **`noir_sha256`** | `prepare` passes; `prove` panics in `calculate_external_row_of_r1cs_matrices`. |
+| **`p256_std`** | `prepare` panics on the unsupported `ECDSA_SECP256R1` black box. |
+| **`oprf`** | `prepare` fails with `no builder for public input ACIR index 10`. |
+
+## Libraries and workspaces
+
+These are libraries or multi-package workspaces rather than single circuits for the three-command recipe:
+
+| Example | Shape | What it demonstrates |
+| :--- | :--- | :--- |
+| **`babyjubjub`** | Library | Baby Jubjub curve operations. |
+| **`eddsa_poseidon2`** | Library | EdDSA verification using Poseidon2. |
+| **`partial_sha256`**, **`noir-native-sha256`** | Libraries | SHA-256 building blocks. |
+| **`noir-passport`**, **`noir-passport-monolithic`** | Workspaces | Passport-style credential circuits and utilities. |
+| **`noir-r1cs-test-programs`** | Test programs | Noir features used by the R1CS compiler test harness. |
+
+## Inspect a proof
+
+A runnable package contains `Nargo.toml`, `Prover.toml`, and `src/main.nr`. After verification, inspect its public inputs:
+
+```sh
+cargo run --release --bin provekit-cli -- show-inputs --hex \
+  <example>.pkv \
+  proof.np
+```
+
+The `basic` example has no public input; `show-inputs` prints an empty list. The tutorial's `secret_knowledge` circuit marks `commitment` public and shows its value in this output.
+
+<Aside type="caution" title="Keep release artifacts together">
+Run these examples from the `v1.0.2` tag. Keys or proofs prepared on `main` can have incompatible formats even when the circuit source looks similar.
+</Aside>

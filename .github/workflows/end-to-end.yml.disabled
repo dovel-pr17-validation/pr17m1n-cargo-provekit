@@ -1,0 +1,172 @@
+name: End-to-end CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+# When a new job is pushed on a PR, cancel the old one.
+concurrency:
+  group: >
+    e2e-${{ github.event_name == 'pull_request'
+        && format('pr-{0}', github.event.pull_request.number)
+        || format('push-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  end-to-end:
+    name: End-to-end tests
+    runs-on: [self-hosted, Linux, ARM64, provekit-build]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain, cache and bins
+        uses: moonrepo/setup-rust@v1
+        with:
+          channel: nightly-2026-03-04
+          cache-base: main
+          components: rustfmt, clippy
+
+      - name: Clean stale artifacts
+        run: cargo clean
+      - name: Build all Rust targets
+        run: cargo build --all-targets --all-features --release --verbose
+
+      - uses: noir-lang/noirup@v0.1.2
+        with:
+          toolchain: v1.0.0-beta.26
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.24
+
+      - name: Compile Nargo circuits 
+        working-directory: noir-examples/noir-passport/merkle_age_check
+        run: |
+          for circuit in t_add_dsc_720 t_add_id_data_720 t_add_integrity_commit t_attest; do
+            echo "Compiling $circuit"
+            nargo compile --force --print-acir --package "$circuit"
+            echo "Compiled $circuit"
+          done
+
+      - name: Clean stale benchmark artifacts
+        working-directory: noir-examples/noir-passport/merkle_age_check
+        run: |
+          rm -f ./benchmark-inputs/*.pkp ./benchmark-inputs/*.pkv ./benchmark-inputs/*.np
+          echo "Cleaned stale benchmark artifacts"
+
+      - name: Prepare circuits 
+        working-directory: noir-examples/noir-passport/merkle_age_check
+        run: |
+          for circuit in t_add_dsc_720 t_add_id_data_720 t_add_integrity_commit t_attest; do
+            echo "Preparing $circuit"
+            cargo run --release --bin provekit-cli prepare ./target/$circuit.json \
+              --pkp ./benchmark-inputs/$circuit-prover.pkp \
+              --pkv ./benchmark-inputs/$circuit-verifier.pkv
+            echo "Prepared $circuit"
+          done
+
+      - name: Generate proofs for all circuits
+        working-directory: noir-examples/noir-passport/merkle_age_check
+        run: |
+          for circuit in t_add_dsc_720 t_add_id_data_720 t_add_integrity_commit t_attest; do
+            echo "Proving $circuit"
+            cargo run --release --bin provekit-cli prove \
+              ./benchmark-inputs/$circuit-prover.pkp \
+              ./benchmark-inputs/tbs_720/$circuit.toml \
+              -o ./benchmark-inputs/$circuit-proof.np
+            echo "Proved $circuit"
+          done
+
+      - name: Verify proofs for all circuits
+        working-directory: noir-examples/noir-passport/merkle_age_check
+        run: |
+          for circuit in t_add_dsc_720 t_add_id_data_720 t_add_integrity_commit t_attest; do
+            echo "Verifying $circuit"
+            cargo run --release --bin provekit-cli verify \
+              ./benchmark-inputs/$circuit-verifier.pkv \
+              ./benchmark-inputs/$circuit-proof.np
+            echo "Verified $circuit"
+          done
+
+      - name: Generate Gnark inputs
+        working-directory: noir-examples/noir-passport/merkle_age_check
+        run: |
+          cargo run --release --bin provekit-cli generate-gnark-inputs \
+            ./benchmark-inputs/t_attest-verifier.pkv \
+            ./benchmark-inputs/t_attest-proof.np
+
+
+      # Cache the Groth16 PK/VK for the recursive verifier across runs.
+      # The keys depend on the recursive-verifier source (which determines the
+      # circuit shape) and the t_attest R1CS inputs. Bumping any of those
+      # invalidates the cache and the keys are regenerated on the next run.
+      - name: Cache Groth16 PK/VK
+        id: cache-gnark-keys
+        uses: actions/cache@v4
+        with:
+          path: recursive-verifier/.gnark-keys
+          key: gnark-keys-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('recursive-verifier/**/*.go', 'recursive-verifier/go.sum', 'noir-examples/noir-passport/merkle_age_check/r1cs.json', 'noir-examples/noir-passport/merkle_age_check/params_for_recursive_verifier') }}
+
+      - name: Resolve cached PK/VK paths
+        id: gnark-keys
+        working-directory: recursive-verifier
+        run: |
+          mkdir -p .gnark-keys
+          pk_file="$(ls -1 .gnark-keys/pk_*.bin 2>/dev/null | head -n1 || true)"
+          vk_file="$(ls -1 .gnark-keys/vk_*.bin 2>/dev/null | head -n1 || true)"
+          if [ -n "$pk_file" ] && [ -n "$vk_file" ]; then
+            echo "pk_arg=--pk $pk_file" >> "$GITHUB_OUTPUT"
+            echo "vk_arg=--vk $vk_file" >> "$GITHUB_OUTPUT"
+            echo "Reusing cached PK ($pk_file) and VK ($vk_file)"
+          else
+            echo "pk_arg=" >> "$GITHUB_OUTPUT"
+            echo "vk_arg=" >> "$GITHUB_OUTPUT"
+            echo "No cached PK/VK found, will generate and save new ones"
+          fi
+
+      - name: Run Gnark verifier
+        working-directory: recursive-verifier
+        run: |
+          go build -o gnark-verifier cmd/cli/main.go
+
+          # Set up cleanup trap
+          cleanup() {
+            if [ ! -z "$MONITOR_PID" ]; then
+              kill $MONITOR_PID 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          # Start monitoring in background
+          (
+            while true; do
+              echo "=== $(date) ==="
+              echo "Memory:"
+              free -h
+              echo "Disk:"
+              df -h
+              echo "Processes:"
+              ps aux --sort=-%mem | head -5
+              echo "=================="
+              sleep 10  # Check every 10 seconds
+            done
+          ) &
+          MONITOR_PID=$!
+
+          # Run the main process. On a cache miss, --saveKeys writes PK/VK to
+          # .gnark-keys so the post-job cache step persists them for next run.
+          ./gnark-verifier \
+            --config "../noir-examples/noir-passport/merkle_age_check/params_for_recursive_verifier" \
+            --r1cs "../noir-examples/noir-passport/merkle_age_check/r1cs.json" \
+            --saveKeys .gnark-keys \
+            ${{ steps.gnark-keys.outputs.pk_arg }} \
+            ${{ steps.gnark-keys.outputs.vk_arg }}
+
+          # Stop monitoring
+          kill $MONITOR_PID

@@ -1,0 +1,86 @@
+---
+title: Frequently asked questions
+description: Common questions about ProveKit's maturity, scope, performance, and integration model.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+## Project and maturity
+
+### What's the project status, and which branch should I use?
+
+Use the `v1.0.2` tag for the examples on this site and for reproducible v1 artifacts. `main` is the rolling-development line and its proof, key, and recursive-verifier formats may change between commits. See [Project status](/reference/project-status/) for the full policy and the [Production checklist](/reference/production-checklist/) for what to verify before shipping.
+
+### Which Noir version does ProveKit support?
+
+The `v1.0.2` release is built with **Noir `v1.0.0-beta.26`**. Other Noir versions may compile and run, but beta.26 is the version pinned in this release. `main` may move ahead of this; check its `Cargo.toml` before assuming compatibility.
+
+## Capabilities and scope
+
+### What proof system does ProveKit use?
+
+A **Spartan-based protocol** with [WHIR](https://github.com/WizardOfMenlo/whir) as the polynomial commitment scheme. Spartan is a SNARK for R1CS that uses sumcheck rounds; WHIR backs those rounds with a hash-based polynomial commitment. No trusted setup for the base proof. The optional recursive verifier wraps proofs in Groth16 for on-chain settlement.
+
+### Is ProveKit post-quantum secure?
+
+The **base WHIR proof is post-quantum secure** under conjectured hash-function PQ-security (256-bit hashes retain roughly 128-bit security against Grover's algorithm). The **optional Groth16 recursive wrapper is not**, since it uses pairing-based cryptography over BN254, which Shor's algorithm breaks. If long-term PQ security matters in your threat model, verify the base WHIR proof off-chain. See [Security and trust model](/concepts/security-model/#cryptographic-assumptions) for the breakdown.
+
+### Can I verify on-chain?
+
+Yes, through the [recursive verifier](/integrations/overview/#recursive-verifier--gnark): export `params_for_recursive_verifier` and `r1cs.json` with `provekit-cli generate-gnark-inputs`, then feed them into the Go/gnark wrapper in `recursive-verifier/`. The wrapper produces a Groth16 outer proof that can be verified by an EVM contract.
+
+### Can I select the proof hash with the CLI?
+
+The v1.0.2 CLI has no `prepare --hash` option. Hashes used inside a Noir circuit are separate from the proof system's transcript. See [Designing circuits](/concepts/designing-circuits/) for that distinction.
+
+## Performance and limits
+
+### How big a circuit can ProveKit handle?
+
+There is no architectural cap. Practical limits depend on the host: the mobile FFI ships a file-backed mmap allocator so circuits whose witness exceeds device RAM can still prove. For very large circuits, configure memory before initialization (`pk_configure_memory` on FFI, `Verity.configureMemory` on mobile SDKs).
+
+### How long does proving take?
+
+It depends on witness count, circuit shape, and host. The proving pipeline is parallelized with [Rayon](https://github.com/rayon-rs/rayon); SIMD-accelerated BN254 arithmetic gives an extra boost on `aarch64`. Benchmark your specific circuit before estimating production timing; see [Performance](/reference/performance/) for the measurement workflow.
+
+### How fast is verification?
+
+Verification is significantly cheaper than proving and runs on every supported host. The native Rust `Verifier::verify` mutates internal Fiat-Shamir state, so reload or clone it before reusing; the **WASM `Verifier` is reusable** because the binding clones its inner state on every `verifyBytes`/`verifyJs` call. The verifier server's concurrency, request timeouts, and per-request `maxVerificationTime` cap (max 300s) are all configurable; see the [verifier-server README](https://github.com/worldfnd/provekit/tree/v1.0.2/tooling/verifier-server) for the full set of `VERIFIER_*` env vars.
+
+### Can I prove in the browser?
+
+The v1.0.2 source includes WASM bindings, but the [JS / TypeScript compatibility page](/e2e/js-typescript/) explains why this site does not currently offer a verified cross-host v1.0.2 browser recipe. Each WASM `Prover` is consumed by one `proveBytes()` or `proveJs()` call.
+
+## Integration
+
+### Do I need to know Rust to use ProveKit?
+
+Only if you embed it through the Rust crates. The CLI is the primary entry point and works with any language that can shell out. The [WASM](/e2e/js-typescript/), [Swift](/e2e/swift/), and [Kotlin](/e2e/kotlin/) pages describe the v1.0.2 compatibility status of other host paths.
+
+### Can I generate `.pkp` and `.pkv` on one machine and use them on another?
+
+Yes, that is the deployment model. Generate keys in CI, record the [provenance](/concepts/artifact-lifecycle/), distribute the verifier key alongside your application, and keep the prover key on the proving host. The artifacts are independent of platform.
+
+### Can I change the circuit's hash after deployment?
+
+Only by regenerating every artifact. A different in-circuit hash changes the circuit, so prepare a new `.pkp` and `.pkv` and generate new proofs.
+
+### What happens if I modify the circuit?
+
+Every downstream artifact is invalidated: `.pkp`, `.pkv`, proofs, recursive params, and `r1cs.json`. Re-run `prepare` and propagate the new artifacts. The verifier will not accept proofs from the old keys. See [Artifact lifecycle](/concepts/artifact-lifecycle/) for the regeneration rules.
+
+## Scope and positioning
+
+### How is ProveKit different from raw Noir?
+
+Noir is a circuit language; ProveKit is a proof system, runtime, and deployment toolkit built around it. Noir defines what you want to prove; ProveKit handles the compilation to R1CS, proof generation, verification, and the host-language integrations. You can think of Noir as your source code and ProveKit as your compiler-plus-runtime.
+
+### Do I have to use the recursive verifier for on-chain settlement?
+
+You have to use *some* on-chain verifier. ProveKit's path is the Go/gnark wrapper, which produces a Groth16 proof that's cheap to verify on EVM chains. Other recursion targets (other proof systems, other curves) would require separate engineering.
+
+## Getting help
+
+### Where do I report bugs?
+
+Open an issue on the [GitHub repository](https://github.com/worldfnd/provekit/issues). Include the information from the "Still stuck?" section of [Common errors](/troubleshooting/common-errors/#still-stuck) so the maintainers can reproduce.

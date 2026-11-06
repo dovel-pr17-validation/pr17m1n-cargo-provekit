@@ -1,0 +1,217 @@
+[workspace]
+resolver = "2"
+members = [
+  "bench-mobile",
+  "skyscraper/fp-rounding",
+  "skyscraper/hla",
+  "skyscraper/bn254-multiplier",
+  "skyscraper/bn254-multiplier-codegen",
+  "skyscraper/core",
+  "provekit/common",
+  "provekit/backend/bn254",
+  "provekit/backend/goldilocks",
+  "provekit/r1cs-compiler",
+  "provekit/prover",
+  "provekit/verifier",
+  "tooling/cli",
+  "tooling/provekit-bench",
+  "tooling/provekit-fixtures",
+  "tooling/provekit-ffi",
+  "tooling/provekit-gnark",
+  "tooling/provekit-wasm",
+  "tooling/verifier-server",
+  "ntt",
+  "provekit/spark",
+  "poseidon2",
+  "playground/passport-input-gen",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+authors = [
+  "Remco Bloemen <remco@world.org>",
+  "Philipp Sippl <philipp@world.org>",
+  "Yuval Domb",
+  "Xander van der Goot",
+  "Koh Wei Jie",
+  "Tony Wu",
+  "Vishruti Ganesh",
+  "Benjamin Wilson",
+  "Yogesh Swami",
+  "Ryan Cao",
+  "Shreyas Londhe",
+  "Aditya Bisht",
+  # TODO: More contributors
+]
+license = "MIT"
+homepage = "https://github.com/worldfnd/ProveKit"
+repository = "https://github.com/worldfnd/ProveKit"
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[workspace.lints.clippy]
+cargo = "warn"
+perf = "warn"
+complexity = "warn"
+style = "warn"
+correctness = "warn"
+suspicious = "warn"
+
+cargo_common_metadata = { level = "allow", priority = 1 }
+multiple_crate_versions = { level = "allow", priority = 1 }
+missing_docs_in_private_items = { level = "allow", priority = 1 }
+
+missing_safety_doc = { level = "deny", priority = 1 }
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "fat"
+
+# Size-optimized builds for mobile (iOS/Android): cargo build --profile release-mobile
+[profile.release-mobile]
+inherits = "release"
+opt-level = "z"
+
+# Fast release builds for development iteration: cargo build --profile release-fast
+[profile.release-fast]
+inherits = "release"
+codegen-units = 16
+lto = "thin"
+
+# Doing light optimizations helps test performance more than it hurts build time.
+[profile.test]
+opt-level = 2
+
+# Compilation profile for any non-workspace member. We want to optimize these even in debug mode.
+[profile.dev.package."*"]
+opt-level = 3
+
+[workspace.dependencies]
+# Workspace members - Skyscraper
+bn254-multiplier = { path = "skyscraper/bn254-multiplier" }
+bn254-multiplier-codegen = { path = "skyscraper/bn254-multiplier-codegen" }
+fp-rounding = { path = "skyscraper/fp-rounding" }
+hla = { path = "skyscraper/hla" }
+skyscraper = { path = "skyscraper/core" }
+ntt = { path = "ntt" }
+poseidon2 = { path = "poseidon2" }
+
+# Workspace members - ProveKit
+provekit-backend-bn254 = { path = "provekit/backend/bn254", features = ["provekit_ntt"] }
+provekit-backend-goldilocks = { path = "provekit/backend/goldilocks" }
+provekit-bench = { path = "tooling/provekit-bench" }
+provekit-cli = { path = "tooling/cli" }
+provekit-common = { path = "provekit/common" }
+provekit-ffi = { path = "tooling/provekit-ffi" }
+provekit-gnark = { path = "tooling/provekit-gnark" }
+provekit-prover = { path = "provekit/prover", default-features = false }
+provekit-r1cs-compiler = { path = "provekit/r1cs-compiler" }
+provekit-spark = { path = "provekit/spark" }
+provekit-verifier = { path = "provekit/verifier" }
+provekit-verifier-server = { path = "tooling/verifier-server" }
+provekit-wasm = { path = "tooling/provekit-wasm" }
+
+# 3rd party
+anyhow = "1.0.93"
+argh = "0.1.12"
+axum = "0.8.4"
+base64 = "0.22.1"
+bincode = "1.3"
+bytes = "1.10.1"
+chrono = "0.4.41"
+# On CI divan get replaced by divan = { package = "codspeed-divan-compat", version = "3.0.1" } for benchmark tracking.
+# This is a workaround because different package selection based on target does not mix well with workspace dependencies.
+divan = "0.1.21"
+hex = "0.4.3"
+inferno = { version = "0.12", default-features = false }
+itertools = "0.14.0"
+inventory = "0.3"
+mobench-sdk = { version = "0.1.47", default-features = false, features = ["registry"] }
+num-bigint = "0.4"
+paste = "1.0.15"
+postcard = { version = "1.1.1", features = ["use-std"] }
+primitive-types = "0.13.1"
+proptest = "1.6.0"
+quickcheck = "1.0.3"
+quickcheck_macros = "1.0.0"
+rand = "0.9.1"
+rand08 = { package = "rand", version = "0.8" }
+rayon = "1.10.0"
+reqwest = "0.12.23"
+ruint = { version = "1.12.3", features = ["num-traits", "rand"] }
+seq-macro = "0.3.6"
+serde = { version = "1.0", features = ["derive"] }
+# `float_roundtrip`: zook configs carry f64s; the default fast parser is off
+# by one ULP on read-back, breaking scheme JSON roundtrips.
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
+# Pinned: blake3 1.8.4+ depends on digest 0.11, but the `whir` crate's
+# blake3 engine is built against digest 0.10. Bumping breaks compilation.
+blake3 = "=1.8.3"
+sha2 = { version = "0.10.9", features = ["asm"] }
+sha3 = "0.10"
+tempfile = "3"
+test-case = "3.3.1"
+tikv-jemallocator = "0.6"
+toml = "0.8.8"
+tokio = { version = "1.47.1", features = ["full"] }
+tokio-util = "0.7.13"
+tower = "0.5.2"
+tower-http = { version = "0.6.6", features = ["cors", "timeout", "trace"] }
+tracing = "0.1.41"
+tracing-flame = "0.2"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "ansi"] }
+tracing-tracy = "=0.11.4"
+tracy-client = "=0.18.0"
+tracy-client-sys = "=0.24.3"
+uniffi = "0.28"
+parking_lot = "0.12"
+keccak = "0.2.0"
+xz2 = "0.1.7"
+zerocopy = "0.8.25"
+zeroize = "1.8.1"
+zstd = "0.14.3"
+
+# WASM-specific dependencies
+js-sys = "0.3"
+lzma-rs = "0.3"
+ruzstd = "0.8"
+wasm-bindgen-rayon = "1.2"
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+console_error_panic_hook = "0.1"
+getrandom = { version = "0.2", features = ["js"] }
+getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+# Required by transitive deps (e.g. rand_core 0.10) when building wasm32-unknown-unknown.
+getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
+# Noir language dependencies
+acir = { git = "https://github.com/noir-lang/noir", rev = "v1.0.0-beta.26" }
+bn254_blackbox_solver = { git = "https://github.com/noir-lang/noir", rev = "v1.0.0-beta.26" }
+nargo = { git = "https://github.com/noir-lang/noir", rev = "v1.0.0-beta.26" }
+nargo_cli = { git = "https://github.com/noir-lang/noir", rev = "v1.0.0-beta.26" }
+nargo_toml = { git = "https://github.com/noir-lang/noir", rev = "v1.0.0-beta.26" }
+noir_artifact_cli = { git = "https://github.com/noir-lang/noir", rev = "v1.0.0-beta.26" }
+noirc_abi = { git = "https://github.com/noir-lang/noir", rev = "v1.0.0-beta.26" }
+noirc_artifacts = { git = "https://github.com/noir-lang/noir", rev = "v1.0.0-beta.26" }
+noirc_driver = { git = "https://github.com/noir-lang/noir", rev = "v1.0.0-beta.26" }
+
+# Cryptography and proof systems
+ark-bn254 = { version = "0.6.0", default-features = false, features = [
+  "scalar_field",
+] }
+
+ark-ff = { version = "0.6", features = ["asm", "std"] }
+ark-poly = "0.6"
+ark-serialize = "0.6"
+ark-std = { version = "0.6", features = ["std"] }
+mavros-vm = { git = "https://github.com/reilabs/mavros", rev = "92ead6f2a919bbcc33ed07aa1bfa82062cfc652e" }
+mavros-artifacts = { git = "https://github.com/reilabs/mavros", rev = "92ead6f2a919bbcc33ed07aa1bfa82062cfc652e" }
+spongefish = { package = "provekit-spongefish", version = "=0.2.0", features = [
+  "ark-ff",
+  "sha2",
+] }
+spongefish-pow = { package = "provekit-spongefish-pow", version = "=0.2.0" }
+whir = { git = "https://github.com/worldfnd/whir.git", rev = "d2b16529d0a4fad4f53d088281e9062898d35f5b", features = ["tracing", "rs_in_order"] }

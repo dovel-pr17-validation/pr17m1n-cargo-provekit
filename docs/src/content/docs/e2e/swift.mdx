@@ -1,0 +1,20 @@
+---
+title: Swift compatibility
+description: Status of iOS integration with ProveKit v1.0.2 artifacts.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The v1.0.2 tag includes [ProveKit's C FFI](https://github.com/worldfnd/provekit/tree/v1.0.2/tooling/provekit-ffi), which is the native integration point for an iOS host. This documentation check did not validate an iOS end-to-end run with v1.0.2 keys and proofs.
+
+<Aside type="caution" title="Match the native build to the artifacts">
+The previous Swift example used a Verity 0.3.2 binary without showing that its ProveKit backend matches v1.0.2. Do not pair that unverified binary with v1.0.2 `.pkp`, `.pkv`, or proof artifacts. Build the FFI and host package from a known compatible release, then verify a proof on an iOS device or simulator before shipping.
+</Aside>
+
+The FFI requires `pk_init()` before prove or verify, memory configuration before initialization, and `pk_free_buf()` for every returned buffer. See the [v1.0.2 FFI source and header](https://github.com/worldfnd/provekit/tree/v1.0.2/tooling/provekit-ffi) for exact calls and ownership rules.
+
+## Related pages
+
+- [Generate artifacts](/e2e/generate-artifacts/)
+- [Artifact lifecycle](/concepts/artifact-lifecycle/)
+- [Rust end-to-end](/e2e/rust/)

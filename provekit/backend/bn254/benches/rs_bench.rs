@@ -1,0 +1,96 @@
+use {
+    ark_bn254::Fr,
+    ark_ff::UniformRand,
+    divan::{black_box, Bencher},
+    provekit_backend_bn254::RSFr,
+    whir::{
+        algebra::ntt::{NttEngine, PolynomialSegment, Polynomials, ReedSolomon},
+        buffer::{Buffer, BufferOps},
+    },
+};
+
+// (exp, expansion, coset_sz): matches whir's expand_from_coeff bench cases.
+// message_length = 2^(exp - coset_sz), num_messages = 2^coset_sz,
+// codeword_length = message_length * expansion.
+const TEST_CASES: &[(usize, usize, usize)] = &[
+    (16, 2, 2),
+    (18, 2, 2),
+    (20, 2, 3),
+    (16, 4, 3),
+    (18, 4, 3),
+    (20, 4, 4),
+    (22, 4, 4),
+];
+
+fn make_messages(exp: usize, coset_sz: usize) -> Vec<Buffer<Fr>> {
+    let message_length = 1 << (exp - coset_sz);
+    let num_messages = 1 << coset_sz;
+    let mut rng = ark_std::rand::thread_rng();
+    (0..num_messages)
+        .map(|_| {
+            Buffer::from(
+                (0..message_length)
+                    .map(|_| Fr::rand(&mut rng))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
+}
+
+fn make_mask(num_messages: usize) -> Buffer<Fr> {
+    let mask_length = 1 << 10;
+    let mut rng = ark_std::rand::thread_rng();
+    Buffer::from(
+        (0..num_messages * mask_length)
+            .map(|_| Fr::rand(&mut rng))
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[divan::bench(args = TEST_CASES)]
+fn rs_fr(bencher: Bencher, case: &(usize, usize, usize)) {
+    let (exp, expansion, coset_sz) = *case;
+    let mask = make_mask(1 << coset_sz);
+    bencher
+        .with_inputs(|| make_messages(exp, coset_sz))
+        .bench_values(|coeffs| {
+            let vector_refs: Vec<&Buffer<Fr>> = coeffs.iter().collect();
+            let message_length = coeffs[0].len();
+            let mask_refs = [&mask];
+            let segments = [
+                PolynomialSegment::from_rows(&vector_refs, 1),
+                PolynomialSegment::from_rows(&mask_refs, vector_refs.len()),
+            ];
+            let codeword_length = message_length * expansion;
+            black_box(
+                RSFr.interleaved_encode(Polynomials::from_segments(&segments), codeword_length),
+            )
+        });
+}
+
+#[divan::bench(args = TEST_CASES)]
+fn whir_ntt_engine(bencher: Bencher, case: &(usize, usize, usize)) {
+    let (exp, expansion, coset_sz) = *case;
+    let mask = make_mask(1 << coset_sz);
+    let reference = NttEngine::<Fr>::new_from_fftfield();
+    bencher
+        .with_inputs(|| make_messages(exp, coset_sz))
+        .bench_values(|coeffs| {
+            let vector_refs: Vec<&Buffer<Fr>> = coeffs.iter().collect();
+            let message_length = coeffs[0].len();
+            let mask_refs = [&mask];
+            let segments = [
+                PolynomialSegment::from_rows(&vector_refs, 1),
+                PolynomialSegment::from_rows(&mask_refs, vector_refs.len()),
+            ];
+            let codeword_length = message_length * expansion;
+            black_box(
+                reference
+                    .interleaved_encode(Polynomials::from_segments(&segments), codeword_length),
+            )
+        });
+}
+
+fn main() {
+    divan::main();
+}

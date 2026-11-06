@@ -1,0 +1,345 @@
+use {
+    anyhow::{ensure, Context, Result},
+    ark_ff::Field,
+    ark_std::{
+        rand::distributions::{Distribution, Standard},
+        One,
+    },
+    provekit_common::{
+        joint_claims::build_joint_forms,
+        prefix_covector::{
+            build_prefix_covectors, expand_powers, linear_form_refs, make_public_weight,
+            OffsetCovector,
+        },
+        utils::sumcheck::{
+            calculate_eq, eval_cubic_poly, multiply_transposed_by_eq_alpha, transpose_r1cs_matrices,
+        },
+        Base, Ext, FieldHash, ProofField, PublicInputs, WhirR1CSProof, WhirR1CSScheme, R1CS,
+    },
+    tracing::instrument,
+    whir::{
+        algebra::{embedding::Embedding, linear_form::LinearForm},
+        transcript::{Codec, DuplexSpongeInterface, Proof, VerifierMessage, VerifierState},
+    },
+};
+
+#[derive(Debug)]
+pub struct DataFromSumcheckVerifier<F: Field> {
+    r:             Vec<F>,
+    alpha:         Vec<F>,
+    blinding_eval: F,
+    f_at_alpha:    F,
+}
+
+pub trait WhirR1CSVerifier<P: ProofField> {
+    fn verify(
+        &self,
+        proof: &WhirR1CSProof,
+        public_inputs: &PublicInputs<Base<P>>,
+        r1cs: &R1CS<Base<P>>,
+    ) -> Result<()>;
+}
+
+impl<P: FieldHash> WhirR1CSVerifier<P> for WhirR1CSScheme<P>
+where
+    Standard: Distribution<Ext<P>>,
+{
+    #[instrument(skip_all)]
+    fn verify(
+        &self,
+        proof: &WhirR1CSProof,
+        public_inputs: &PublicInputs<Base<P>>,
+        r1cs: &R1CS<Base<P>>,
+    ) -> Result<()> {
+        self.validate_joint_opening()?;
+        let actual_r1cs_hash = r1cs.hash();
+        anyhow::ensure!(
+            self.r1cs_hash == actual_r1cs_hash,
+            "R1CS hash mismatch: scheme expects {:?}, got {:?}",
+            self.r1cs_hash,
+            actual_r1cs_hash
+        );
+
+        let public_inputs_hash = P::hash_public_inputs(self.hash_config, &public_inputs.0);
+        let instance = P::ext_to_bytes_le(&public_inputs_hash);
+        let ds = self.create_domain_separator().instance(&instance);
+        let whir_proof = Proof {
+            narg_string: proof.narg_string.clone(),
+            hints: proof.hints.clone(),
+            #[cfg(debug_assertions)]
+            pattern: proof.pattern.clone(),
+        };
+        let mut arthur =
+            VerifierState::new(&ds, &whir_proof, P::transcript_sponge(self.hash_config));
+
+        let commitment_1 = self
+            .whir_witness
+            .receive_commitment(&mut arthur)
+            .map_err(|_| anyhow::anyhow!("Failed to parse commitment 1"))?;
+
+        // Mirror the prover: the ext blinding commitment is absorbed immediately
+        // after the (w1) witness commitment, before any challenge sampling.
+        let blinding_commitment = self
+            .whir_blinding
+            .receive_commitment(&mut arthur)
+            .map_err(|_| anyhow::anyhow!("Failed to parse blinding commitment"))?;
+
+        let (commitment_2, logup_challenges) = if self.num_challenges > 0 {
+            let challenges: Vec<Ext<P>> = arthur.verifier_message_vec(self.num_challenges);
+            let commitment = self
+                .whir_witness
+                .receive_commitment(&mut arthur)
+                .map_err(|_| anyhow::anyhow!("Failed to parse commitment 2"))?;
+            (Some(commitment), Some(challenges))
+        } else {
+            (None, None)
+        };
+        let (transposed, sumcheck_result) = rayon::join(
+            || transpose_r1cs_matrices(r1cs),
+            || run_sumcheck_verifier::<Ext<P>, _>(&mut arthur, self.m_0),
+        );
+        let data_from_sumcheck_verifier = sumcheck_result.context("while verifying sumcheck")?;
+        let (at, bt, ct) = transposed;
+
+        let public_inputs_hash_buf: Ext<P> = arthur
+            .prover_message()
+            .map_err(|_| anyhow::anyhow!("Failed to read public inputs hash"))?;
+        ensure!(
+            public_inputs_hash_buf == public_inputs_hash,
+            "Public inputs hash mismatch: expected {:?}, got {:?}",
+            public_inputs_hash,
+            public_inputs_hash_buf
+        );
+        let x: Ext<P> = arthur.verifier_message();
+
+        let embedding = <P::Embedding>::default();
+        let alphas = multiply_transposed_by_eq_alpha(
+            &embedding,
+            &at,
+            &bt,
+            &ct,
+            &data_from_sumcheck_verifier.alpha,
+            r1cs,
+        );
+
+        let blinding_eval = data_from_sumcheck_verifier.blinding_eval;
+        let blinding_weights = expand_powers::<4, _>(&data_from_sumcheck_verifier.alpha);
+
+        let (az_at_alpha, bz_at_alpha, cz_at_alpha) = if let Some(commitment_2) = commitment_2 {
+            let forms = build_joint_forms(
+                self.m,
+                self.w1_size,
+                alphas,
+                x,
+                public_inputs.len(),
+                &self.challenge_offsets,
+            )?;
+            let matrix_evals: [Ext<P>; 3] = [
+                arthur
+                    .prover_message()
+                    .map_err(|_| anyhow::anyhow!("Failed to read joint A evaluation"))?,
+                arthur
+                    .prover_message()
+                    .map_err(|_| anyhow::anyhow!("Failed to read joint B evaluation"))?,
+                arthur
+                    .prover_message()
+                    .map_err(|_| anyhow::anyhow!("Failed to read joint C evaluation"))?,
+            ];
+            let mut evaluations = matrix_evals.to_vec();
+            if !public_inputs.is_empty() {
+                let public_eval = arthur
+                    .prover_message()
+                    .map_err(|_| anyhow::anyhow!("Failed to read joint public evaluation"))?;
+                verify_public_input_binding(&embedding, public_eval, x, public_inputs)?;
+                evaluations.push(public_eval);
+            }
+            if let Some(ref challenges) = logup_challenges {
+                let challenge_eval = arthur
+                    .prover_message()
+                    .map_err(|_| anyhow::anyhow!("Failed to read joint challenge evaluation"))?;
+                verify_challenge_binding(challenge_eval, x, challenges)?;
+                evaluations.push(challenge_eval);
+            }
+            let form_refs = linear_form_refs(&forms);
+            let final_claim = self
+                .whir_witness
+                .verify_pair(
+                    &mut arthur,
+                    [commitment_1, commitment_2],
+                    &form_refs,
+                    &evaluations,
+                )
+                .map_err(|_| anyhow::anyhow!("Joint WHIR verification failed"))?;
+            final_claim
+                .verify(&form_refs)
+                .map_err(|_| anyhow::anyhow!("Joint WHIR final-claim check failed"))?;
+            (matrix_evals[0], matrix_evals[1], matrix_evals[2])
+        } else {
+            let evals: [Ext<P>; 3] = [
+                arthur
+                    .prover_message()
+                    .map_err(|_| anyhow::anyhow!("Failed to read evals[0]"))?,
+                arthur
+                    .prover_message()
+                    .map_err(|_| anyhow::anyhow!("Failed to read evals[1]"))?,
+                arthur
+                    .prover_message()
+                    .map_err(|_| anyhow::anyhow!("Failed to read evals[2]"))?,
+            ];
+
+            let mut weights = build_prefix_covectors(self.m, alphas);
+
+            let evaluations = if !public_inputs.is_empty() {
+                let public_eval: Ext<P> = arthur
+                    .prover_message()
+                    .map_err(|_| anyhow::anyhow!("Failed to read public eval"))?;
+                verify_public_input_binding(&embedding, public_eval, x, public_inputs)?;
+                weights.insert(0, make_public_weight(x, public_inputs.len(), self.m));
+                vec![public_eval, evals[0], evals[1], evals[2]]
+            } else {
+                evals.to_vec()
+            };
+
+            let weight_refs = linear_form_refs(&weights);
+
+            let fc = self
+                .whir_witness
+                .verify(&mut arthur, commitment_1, &weight_refs, &evaluations)
+                .map_err(|_| anyhow::anyhow!("WHIR verification failed"))?;
+            fc.verify(&weight_refs)
+                .map_err(|_| anyhow::anyhow!("WHIR final-claim check failed"))?;
+
+            (evals[0], evals[1], evals[2])
+        };
+
+        // Open the ext blinding commitment: verify `blinding_eval` against the
+        // sumcheck power covector over the committed blinding vector (g at
+        // offset 0). Mirrors the prover's single blinding open after all base
+        // opens.
+        {
+            let blind_domain = self.blinding_domain_size();
+            let blinding_covector = OffsetCovector::new(blinding_weights, 0, blind_domain);
+            let fc_b = self
+                .whir_blinding
+                .verify(&mut arthur, &[&blinding_commitment], &[blinding_eval])
+                .map_err(|_| anyhow::anyhow!("WHIR verification failed for blinding"))?;
+            fc_b.verify(std::iter::once(
+                &blinding_covector as &dyn LinearForm<Ext<P>>,
+            ))
+            .map_err(|_| anyhow::anyhow!("WHIR final-claim check failed for blinding"))?;
+        }
+
+        ensure!(
+            data_from_sumcheck_verifier.f_at_alpha
+                == (az_at_alpha * bz_at_alpha - cz_at_alpha)
+                    * calculate_eq(
+                        &data_from_sumcheck_verifier.r,
+                        &data_from_sumcheck_verifier.alpha
+                    ),
+            "last sumcheck value does not match"
+        );
+
+        arthur
+            .check_eof()
+            .map_err(|_| anyhow::anyhow!("Proof contains unparsed trailing bytes"))
+    }
+}
+
+#[instrument(skip_all)]
+pub fn run_sumcheck_verifier<F: Field + Codec, S: DuplexSpongeInterface<U = u8>>(
+    arthur: &mut VerifierState<'_, S>,
+    m_0: usize,
+) -> Result<DataFromSumcheckVerifier<F>> {
+    let r: Vec<F> = arthur.verifier_message_vec(m_0);
+
+    let sum_g: F = arthur
+        .prover_message()
+        .map_err(|_| anyhow::anyhow!("Failed to read sum_g"))?;
+
+    let rho: F = arthur.verifier_message();
+
+    let mut saved_val_for_sumcheck_equality_assertion = rho * sum_g;
+
+    let mut alpha = vec![F::zero(); m_0];
+
+    for item in &mut alpha {
+        let hhat_i: [F; 4] = [
+            arthur
+                .prover_message()
+                .map_err(|_| anyhow::anyhow!("Failed to read hhat coeff"))?,
+            arthur
+                .prover_message()
+                .map_err(|_| anyhow::anyhow!("Failed to read hhat coeff"))?,
+            arthur
+                .prover_message()
+                .map_err(|_| anyhow::anyhow!("Failed to read hhat coeff"))?,
+            arthur
+                .prover_message()
+                .map_err(|_| anyhow::anyhow!("Failed to read hhat coeff"))?,
+        ];
+        let alpha_i: F = arthur.verifier_message();
+        *item = alpha_i;
+        let hhat_i_at_zero = eval_cubic_poly(hhat_i, F::zero());
+        let hhat_i_at_one = eval_cubic_poly(hhat_i, F::one());
+        ensure!(
+            saved_val_for_sumcheck_equality_assertion == hhat_i_at_zero + hhat_i_at_one,
+            "Sumcheck equality assertion failed"
+        );
+        saved_val_for_sumcheck_equality_assertion = eval_cubic_poly(hhat_i, alpha_i);
+    }
+
+    let blinding_eval: F = arthur
+        .prover_message()
+        .map_err(|_| anyhow::anyhow!("Failed to read blinding eval"))?;
+
+    let f_at_alpha = saved_val_for_sumcheck_equality_assertion - rho * blinding_eval;
+
+    Ok(DataFromSumcheckVerifier {
+        r,
+        alpha,
+        blinding_eval,
+        f_at_alpha,
+    })
+}
+
+/// Verify that the prover's claimed challenge evaluation matches the
+/// Fiat-Shamir challenges sampled by the verifier. This binds the committed
+/// w2 polynomial to the transcript-derived challenge values.
+fn verify_challenge_binding<F: Field>(challenge_eval: F, x: F, challenges: &[F]) -> Result<()> {
+    let mut expected = F::zero();
+    let mut x_pow = F::one();
+    for &ch in challenges {
+        expected += x_pow * ch;
+        x_pow *= x;
+    }
+    ensure!(
+        challenge_eval == expected,
+        "Challenge binding check failed: expected {expected:?}, got {challenge_eval:?}"
+    );
+    Ok(())
+}
+
+/// Verify that the prover's claimed public evaluation matches the known public
+/// inputs. The weight covers positions `[0, 1, ..., N]` where position 0 is the
+/// R1CS constant `1` and positions `1..=N` are the public inputs.
+///
+/// Public inputs are base-field values; each is lifted into the extension via
+/// the embedding (`mixed_mul`) as it is folded against the extension point `x`.
+fn verify_public_input_binding<M: Embedding>(
+    embedding: &M,
+    public_eval: M::Target,
+    x: M::Target,
+    public_inputs: &PublicInputs<M::Source>,
+) -> Result<()> {
+    let mut expected = M::Target::one();
+    let mut x_pow = x;
+    for &pi in &public_inputs.0 {
+        expected += embedding.mixed_mul(x_pow, pi);
+        x_pow *= x;
+    }
+    ensure!(
+        public_eval == expected,
+        "Public input binding check failed: expected {expected:?}, got {public_eval:?}"
+    );
+    Ok(())
+}

@@ -1,0 +1,114 @@
+//! Analyze ACIR circuit statistics and R1CS complexity (Noir only).
+//!
+//! This command is not supported for Mavros — it operates on Noir ACIR
+//! circuit artifacts.
+//!
+//! # Example
+//!
+//! ```sh
+//! cargo run --release --bin provekit-cli circuit-stats ./target/basic.json
+//! ```
+
+mod display;
+mod memory;
+mod stats_collector;
+
+use {
+    super::Command,
+    acir::{circuit::Program, FieldElement},
+    anyhow::{Context, Result},
+    argh::FromArgs,
+    base64::Engine,
+    provekit_r1cs_compiler::{noir_to_r1cs_with_breakdown, optimize_r1cs},
+    stats_collector::CircuitStats,
+    std::{
+        collections::HashSet,
+        fs,
+        path::{Path, PathBuf},
+    },
+    tracing::instrument,
+};
+
+#[derive(FromArgs, PartialEq, Eq, Debug)]
+#[argh(
+    subcommand,
+    name = "circuit-stats",
+    description = "analyze ACIR circuit statistics and R1CS complexity (Noir only, not supported \
+                   for Mavros)"
+)]
+pub struct Args {
+    #[argh(positional, description = "path to the ACIR circuit file (.json)")]
+    circuit_path: PathBuf,
+}
+
+impl Command for Args {
+    #[instrument(skip_all)]
+    fn run(&self) -> Result<()> {
+        let program = load_program(&self.circuit_path)?;
+        analyze_circuit(program, &self.circuit_path)
+    }
+}
+
+fn load_program(path: &Path) -> Result<Program<FieldElement>> {
+    let json_string = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read circuit file: {}", path.display()))?;
+
+    let json: serde_json::Value =
+        serde_json::from_str(&json_string).context("Failed to parse circuit JSON")?;
+
+    let bytecode_str = json["bytecode"]
+        .as_str()
+        .context("Expected 'bytecode' field in circuit JSON")?;
+
+    let bytecode = base64::prelude::BASE64_STANDARD
+        .decode(bytecode_str)
+        .context("Failed to decode base64 bytecode")?;
+
+    Program::deserialize_program(&bytecode).context("Failed to deserialize ACIR program")
+}
+
+fn analyze_circuit(program: Program<FieldElement>, path: &Path) -> Result<()> {
+    anyhow::ensure!(
+        program.functions.len() == 1,
+        "Only single-function programs are currently supported (found {} functions)",
+        program.functions.len()
+    );
+
+    let Program {
+        mut functions,
+        unconstrained_functions: _,
+    } = program;
+    let circuit = functions.pop().unwrap();
+
+    println!("\n╔═══════════════════════════════════════════════════════════════╗");
+    println!("║                   ACIR Circuit Analysis                       ║");
+    println!("╚═══════════════════════════════════════════════════════════════╝");
+    println!("Circuit: {}", path.display());
+
+    display::print_io_summary(&circuit);
+
+    let stats = CircuitStats::from_circuit(&circuit);
+
+    display::print_acir_stats(&stats);
+
+    let (r1cs, mut witness_map, mut witness_builders, breakdown) =
+        noir_to_r1cs_with_breakdown(&circuit).context("Failed to compile circuit to R1CS")?;
+    let acir_public_inputs_indices_set: HashSet<u32> =
+        circuit.public_inputs().indices().iter().cloned().collect();
+
+    let num_acir_witnesses = witness_map.iter().flatten().count();
+    display::print_r1cs_breakdown(&stats, num_acir_witnesses, &r1cs, &breakdown);
+
+    // Run Gaussian elimination optimization and display results
+    let mut optimized_r1cs = r1cs.clone();
+    let opt_stats = optimize_r1cs(
+        &mut optimized_r1cs,
+        &mut witness_builders,
+        &mut witness_map,
+        &acir_public_inputs_indices_set,
+    )?;
+
+    display::print_ge_optimization(&r1cs, &optimized_r1cs, &opt_stats);
+
+    Ok(())
+}

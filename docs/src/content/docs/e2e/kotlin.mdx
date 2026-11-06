@@ -1,0 +1,20 @@
+---
+title: Kotlin compatibility
+description: Status of Android integration with ProveKit v1.0.2 artifacts.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The v1.0.2 tag includes [ProveKit's C FFI](https://github.com/worldfnd/provekit/tree/v1.0.2/tooling/provekit-ffi), which can be wrapped by JNI for Android. This documentation check did not validate an Android end-to-end run with v1.0.2 keys and proofs.
+
+<Aside type="caution" title="Match the native build to the artifacts">
+The previous Kotlin example used a Verity 0.3.2 AAR without showing that its ProveKit backend matches v1.0.2. Do not pair that unverified AAR with v1.0.2 `.pkp`, `.pkv`, or proof artifacts. Build the FFI and Android package from a known compatible release, then verify a proof on each target ABI before shipping.
+</Aside>
+
+The FFI requires `pk_init()` before prove or verify, memory configuration before initialization, and `pk_free_buf()` for every returned buffer. See the [v1.0.2 FFI source and header](https://github.com/worldfnd/provekit/tree/v1.0.2/tooling/provekit-ffi) for exact calls and ownership rules.
+
+## Related pages
+
+- [Generate artifacts](/e2e/generate-artifacts/)
+- [Artifact lifecycle](/concepts/artifact-lifecycle/)
+- [Rust end-to-end](/e2e/rust/)

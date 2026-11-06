@@ -1,0 +1,55 @@
+[package]
+name = "provekit-cli"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Workspace crates
+mavros-artifacts.workspace = true
+provekit-common.workspace = true
+provekit-backend-bn254 = { workspace = true, features = ["witness-generation", "parallel"] }
+provekit-r1cs-compiler.workspace = true
+provekit-spark.workspace = true
+
+# Noir language
+acir.workspace = true
+nargo.workspace = true
+nargo_toml.workspace = true
+noir_artifact_cli.workspace = true
+noirc_abi.workspace = true
+noirc_driver.workspace = true
+
+# Cryptography and proof systems
+ark-ff.workspace = true
+
+# 3rd party
+anyhow.workspace = true
+bincode.workspace = true
+argh.workspace = true
+base64.workspace = true
+hex.workspace = true
+postcard.workspace = true
+rayon.workspace = true
+serde_json.workspace = true
+tikv-jemallocator = { workspace = true, optional = true }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-tracy = { workspace = true, optional = true, features = [
+    "default",
+    "sampling",
+    "manual-lifetime",
+] }
+
+[lints]
+workspace = true
+
+[features]
+default = ["profiling-allocator"]
+profiling-allocator = []
+jemalloc = ["profiling-allocator", "dep:tikv-jemallocator"]
+tracy = ["profiling-allocator", "dep:tracing-tracy"]

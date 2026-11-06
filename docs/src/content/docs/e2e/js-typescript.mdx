@@ -1,0 +1,20 @@
+---
+title: JS / TypeScript compatibility
+description: Compatibility boundary for using ProveKit v1.0.2 artifacts from JavaScript or TypeScript.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+ProveKit v1.0.2 includes [WASM bindings](https://github.com/worldfnd/provekit/tree/v1.0.2/tooling/provekit-wasm), but this release does not include a checked-in browser application or a verified JavaScript end-to-end recipe. The CLI and [Rust guide](/e2e/rust/) are the tested paths for generating and verifying v1.0.2 artifacts.
+
+<Aside type="caution" title="Do not mix Noir versions">
+The published `@atheonxyz/verity` 0.3.2 alpha JavaScript package declares Noir `1.0.0-beta.11` peer dependencies. ProveKit v1.0.2 is built with Noir `1.0.0-beta.26`. The previous Verity example on this page used those beta.11 packages and pointed to a `playground/wasm-demo` directory that is not present in the v1.0.2 tag. Do not use that recipe with v1.0.2 keys or proofs.
+</Aside>
+
+If you build `tooling/provekit-wasm` from the v1.0.2 tag for a custom application, use the matching Noir beta.26 packages for witness generation and test both directions of artifact exchange against the v1.0.2 CLI. A local WASM build could generate and verify its own proof, but cross-verification with the CLI did not pass in this documentation check, so the WASM path is not yet documented as an end-to-end v1.0.2 example.
+
+## Related pages
+
+- [Installation](/getting-started/installation/)
+- [Rust end-to-end](/e2e/rust/)
+- [Artifact lifecycle](/concepts/artifact-lifecycle/)

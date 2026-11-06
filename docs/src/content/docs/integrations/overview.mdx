@@ -1,0 +1,85 @@
+---
+title: Integrations overview
+description: Pick the integration path that matches where ProveKit will prove or verify in your system.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+ProveKit ships one proof pipeline and several runtimes that drive it. Pick by where verification needs to live and what host language you're shipping in.
+
+<Aside type="note" title="v1.0.2 integration status">
+The CLI and direct Rust crate paths below completed end-to-end checks with v1.0.2. This release also includes WASM and C FFI bindings, but the JavaScript, Swift, and Kotlin SDK recipes previously shown here were not validated against v1.0.2 artifacts. Their platform pages explain the compatibility boundary.
+</Aside>
+
+## Proving across hosts
+
+The v1.0.2 `.pkp` is generated once per circuit. These are the tested ways to use it:
+
+<Tabs>
+<TabItem label="CLI">
+```sh
+provekit-cli prove --prover app.pkp --input Prover.toml --out proof.np
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use provekit_common::{file::read, Prover};
+use provekit_prover::Prove;
+
+let prover: Prover = read("app.pkp")?;
+let proof = prover.prove_with_toml("Prover.toml")?;
+```
+</TabItem>
+</Tabs>
+
+Verification usually lives in a backend, a contract gateway, or an HTTP service. See the [Rust guide](/e2e/rust/) for the tested verify-side call.
+
+## Verifier server
+
+[`tooling/verifier-server`](https://github.com/worldfnd/provekit/tree/v1.0.2/tooling/verifier-server) exposes an Axum HTTP service:
+
+| Route | Method | Purpose |
+| :--- | :--- | :--- |
+| `/health` | `GET` | Server health, version, and timestamp. |
+| `/verify` | `POST` | Verify a JSON proof using downloaded artifacts. |
+
+The server accepts this request shape. The URLs and `np` value below are placeholders, so this JSON is not a runnable verification example:
+
+```json
+{
+  "pkvUrl": "https://example.com/verifier.pkv",
+  "r1csUrl": "https://example.com/r1cs.json",
+  "pkUrl": "https://example.com/proving_key.bin",
+  "vkUrl": "https://example.com/verification_key.bin",
+  "np": { "proof": "NoirProof JSON fields" },
+  "verificationParams": { "maxVerificationTime": 300 },
+  "metadata": { "requestId": "request-123" }
+}
+```
+
+`pkUrl`, `vkUrl`, `verificationParams`, and `metadata` are optional. Supply a real JSON-serialized `NoirProof` and matching artifacts over HTTP or HTTPS. This server route was not exercised end to end in the v1.0.2 documentation check. The server defaults to one concurrent verification (`VERIFIER_SEMAPHORE_LIMIT=1`) and a 10 MB request body limit; tune both through the `VERIFIER_*` environment variables documented in [`tooling/verifier-server/README.md`](https://github.com/worldfnd/provekit/tree/v1.0.2/tooling/verifier-server).
+
+## Recursive verifier / gnark
+
+Use `generate-gnark-inputs` to bridge a ProveKit prover key and proof into the Go/gnark recursive verifier:
+
+```sh
+provekit-cli generate-gnark-inputs \
+  artifacts/app.pkp \
+  artifacts/proof.np \
+  --params artifacts/params_for_recursive_verifier \
+  --r1cs   artifacts/r1cs.json
+```
+
+The command above generated the recursive input files in the v1.0.2 documentation check. The Go proving and verification step was not run. The [`recursive-verifier/`](https://github.com/worldfnd/provekit/tree/v1.0.2/recursive-verifier) CLI or server consumes those files; if you omit its recursive proving and verifying keys, it can generate them for development. Production deployments should manage trusted setup keys explicitly.
+
+## Where to go next
+
+The platform pages cover the supported API paths, default artifact flow, and build constraints for each host.
+
+- **[Rust](/e2e/rust/)**: direct crate integration for services, tools, and tests.
+- **[JS / TypeScript](/e2e/js-typescript/)**: v1.0.2 WASM and SDK compatibility status.
+- **[Swift](/e2e/swift/)**: iOS FFI and SDK compatibility status.
+- **[Kotlin](/e2e/kotlin/)**: Android FFI and SDK compatibility status.
+
+Before shipping any integration, walk through the [Production checklist](/reference/production-checklist/).

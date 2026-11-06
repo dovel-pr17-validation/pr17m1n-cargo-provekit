@@ -1,0 +1,175 @@
+name: Cargo Build & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+# When a new job is pushed on a PR, cancel the old one.
+concurrency:
+  group: >
+    ci-${{ github.event_name == 'pull_request'
+        && format('pr-{0}', github.event.pull_request.number)
+        || format('push-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build_and_test:
+    name: Build & Test (all features)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup rust toolchain, cache and bins
+        uses: moonrepo/setup-rust@v1
+        with:
+          channel: nightly-2026-03-04
+          cache-base: main
+      - name: Setup Noir
+        uses: noir-lang/noirup@v0.1.2
+        with:
+          toolchain: v1.0.0-beta.26
+      - name: Generate mobile benchmark Noir artifacts
+        env:
+          MOBENCH_CI_PREPARE: "1"
+        run: bench-mobile/scripts/generate-fixtures.sh
+      - name: Build
+        run: cargo build --all-targets --all-features --verbose
+      - name: Run tests
+        run: cargo test --no-fail-fast --all-features --verbose --lib --tests --bins
+      - name: Run doc tests
+        run: cargo test --doc --all-features --verbose
+      - name: FFI Integration Tests
+        run: cargo test -p provekit-ffi --test ffi_integration --release
+
+  cargo_clippy:
+    name: Clippy (all features)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup rust toolchain, cache and bins
+        uses: moonrepo/setup-rust@v1
+        with:
+          channel: nightly-2026-03-04
+          cache-base: main
+          components: clippy
+      - name: Clippy Check
+        run: cargo clippy --all-targets --all-features --verbose
+
+  cargo_fmt:
+    name: Cargo fmt
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup rust toolchain, cache and bins
+        uses: moonrepo/setup-rust@v1
+        with:
+          channel: nightly-2026-03-04
+          cache-base: main
+          components: rustfmt
+      - name: Rustfmt Check
+        run: cargo fmt --all --check
+
+  cargo_doc:
+    name: Documentation
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup rust toolchain, cache and bins
+        uses: moonrepo/setup-rust@v1
+        with:
+          channel: nightly-2026-03-04
+          cache-base: main
+      - name: Build docs
+        run: cargo doc --workspace --all-features --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: "--cfg doc_cfg -D warnings"
+
+  unused_deps:
+    name: Check for unused dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: machete
+        uses: bnjbvr/cargo-machete@main
+        with:
+          args: --with-metadata
+
+  typos:
+    name: Spell check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: crate-ci/typos@v1.44.0
+
+  field_separation:
+    name: Field-backend separation guard
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup rust toolchain, cache and bins
+        uses: moonrepo/setup-rust@v1
+        with:
+          channel: nightly-2026-03-04
+          cache-base: main
+      - name: Check field-backend dependency separation
+        run: ./scripts/check-field-separation.sh
+
+  goldilocks_standalone:
+    name: Goldilocks backend (standalone, no --all-features)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup rust toolchain, cache and bins
+        uses: moonrepo/setup-rust@v1
+        with:
+          channel: nightly-2026-03-04
+          cache-base: main
+      - name: Build goldilocks backend in isolation
+        run: cargo build --all-targets -p provekit-backend-goldilocks
+      - name: Test goldilocks backend in isolation
+        run: cargo test --no-fail-fast --lib --tests --bins -p provekit-backend-goldilocks
+
+  bn254_standalone:
+    name: BN254 backend (standalone, no --all-features)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup rust toolchain, cache and bins
+        uses: moonrepo/setup-rust@v1
+        with:
+          channel: nightly-2026-03-04
+          cache-base: main
+      - name: Build bn254 backend in isolation
+        run: cargo build --all-targets -p provekit-backend-bn254 --features witness-generation,provekit_ntt
+      - name: Build bn254-welded tooling in isolation
+        run: >
+          cargo build --all-targets
+          -p provekit-r1cs-compiler -p provekit-cli -p provekit-ffi -p provekit-gnark
+          -p provekit-bench -p verifier-server -p passport-input-gen
+      - name: Test bn254 backend in isolation
+        run: cargo test --no-fail-fast --lib --tests --bins -p provekit-backend-bn254 --features witness-generation,provekit_ntt
+      - name: Test bn254-welded tooling in isolation
+        run: >
+          cargo test --no-fail-fast --lib --tests --bins
+          -p provekit-r1cs-compiler -p provekit-cli -p provekit-ffi -p provekit-gnark
+          -p provekit-bench -p verifier-server -p passport-input-gen
+
+  fixtures:
+    name: Cross-field fixtures (both backends)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup rust toolchain, cache and bins
+        uses: moonrepo/setup-rust@v1
+        with:
+          channel: nightly-2026-03-04
+          cache-base: main
+      - name: Test fixtures (both fields)
+        run: >
+          cargo test -p provekit-fixtures
+          --test goldilocks_roundtrip --test goldilocks_soundness
+          --test bn254_roundtrip --test bn254_soundness
